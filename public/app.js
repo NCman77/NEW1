@@ -1,7 +1,7 @@
 /**
  * app.js
  * 核心邏輯層:負責資料處理、演算法運算、DOM 渲染與事件綁定
- * V27.0 重構版:模組化架構,拆分 Firebase、Profile、UI 渲染服務
+ * V28.0 性能優化版:修復內存洩漏、添加防抖、優化 DOM 操作
  */
 
 import { GAME_CONFIG } from './game_config.js';
@@ -38,7 +38,9 @@ for (let y = 2021; y <= currentYear; y++) {
 
 const CONFIG = {
     JSON_URL: 'data/lottery-data.json',
-    ZIP_URLS: zipUrls
+    ZIP_URLS: zipUrls,
+    DEBOUNCE_DELAY: 300,  // 防抖延遲 (ms)
+    DASHBOARD_UPDATE_THROTTLE: 100  // 儀表板更新節流 (ms)
 };
 
 const App = {
@@ -51,7 +53,17 @@ const App = {
         filterPeriod: "",
         filterYear: "",
         filterMonth: "",
-        drawOrder: 'size' // 預設用大小順序顯示
+        drawOrder: 'size', // 預設用大小順序顯示
+        
+        // ===== 性能優化狀態 =====
+        isInitialized: false,  // 防止重複初始化
+        isInitializing: false,  // 防止並發初始化
+        debounceTimers: {},  // 防抖計時器集合
+        lastDashboardUpdate: 0,  // 上次儀表板更新時間
+        eventListenersAttached: false,  // 事件監聽器是否已附加
+        zipDataCache: null,  // ZIP 數據緩存
+        liveDataCache: null,  // Live 數據緩存
+        lastInitFetchTime: 0  // 上次 initFetch 時間
     },
 
     // 服務模組引用(供外部訪問)
@@ -60,14 +72,36 @@ const App = {
     UIRenderer,
 
     async init() {
-        await FirebaseService.init();
-        await ProfileService.init();
-        this.setupAuthListener();
-        this.selectSchool('balance');
-        this.populateYearSelect();
-        this.populateMonthSelect();
-        this.initFetch();
-        this.bindEvents();
+        // ===== 防止重複初始化 =====
+        if (this.state.isInitialized) {
+            console.warn('⚠️ App 已初始化，跳過重複初始化');
+            return;
+        }
+        if (this.state.isInitializing) {
+            console.warn('⚠️ App 正在初始化中，跳過並發初始化');
+            return;
+        }
+
+        this.state.isInitializing = true;
+
+        try {
+            await FirebaseService.init();
+            await ProfileService.init();
+            this.setupAuthListener();
+            this.selectSchool('balance');
+            this.populateYearSelect();
+            this.populateMonthSelect();
+            this.bindEvents();  // 先綁定事件
+            await this.initFetch();  // 再加載數據
+
+            this.state.isInitialized = true;
+            console.log('✅ App 初始化完成');
+        } catch (e) {
+            console.error('❌ App 初始化失敗:', e);
+            this.state.isInitializing = false;
+        }
+
+        this.state.isInitializing = false;
     },
 
     setupAuthListener() {
@@ -77,23 +111,51 @@ const App = {
     },
 
     bindEvents() {
+        // ===== 防止重複綁定事件 =====
+        if (this.state.eventListenersAttached) {
+            console.warn('⚠️ 事件監聽器已附加，跳過重複綁定');
+            return;
+        }
+
         const periodInput = document.getElementById('search-period');
         if (periodInput) {
             periodInput.addEventListener('input', (e) => {
                 this.state.filterPeriod = e.target.value.trim();
-                this.updateDashboard();
+                this.debouncedUpdateDashboard();
             });
         }
-        document.getElementById('search-year')
-            .addEventListener('change', (e) => {
+
+        const yearSelect = document.getElementById('search-year');
+        if (yearSelect) {
+            yearSelect.addEventListener('change', (e) => {
                 this.state.filterYear = e.target.value;
-                this.updateDashboard();
+                this.debouncedUpdateDashboard();
             });
-        document.getElementById('search-month')
-            .addEventListener('change', (e) => {
+        }
+
+        const monthSelect = document.getElementById('search-month');
+        if (monthSelect) {
+            monthSelect.addEventListener('change', (e) => {
                 this.state.filterMonth = e.target.value;
-                this.updateDashboard();
+                this.debouncedUpdateDashboard();
             });
+        }
+
+        this.state.eventListenersAttached = true;
+        console.log('✅ 事件監聽器已綁定');
+    },
+
+    // ===== 防抖函數 =====
+    debouncedUpdateDashboard() {
+        // 清除之前的計時器
+        if (this.state.debounceTimers.updateDashboard) {
+            clearTimeout(this.state.debounceTimers.updateDashboard);
+        }
+
+        // 設置新的計時器
+        this.state.debounceTimers.updateDashboard = setTimeout(() => {
+            this.updateDashboard();
+        }, CONFIG.DEBOUNCE_DELAY);
     },
 
     // ================= 認證 UI 更新 =================
@@ -102,6 +164,11 @@ const App = {
         const userInfo = document.getElementById('user-info');
         const userName = document.getElementById('user-name');
         const dot = document.getElementById('login-status-dot');
+
+        if (!loginBtn || !userInfo || !userName || !dot) {
+            console.warn('⚠️ 認證 UI 元素未找到');
+            return;
+        }
 
         if (user) {
             loginBtn.classList.add('hidden');
@@ -119,6 +186,14 @@ const App = {
 
     // ================= 核心資料載入流程 =================
     async initFetch() {
+        // ===== 防止過於頻繁的 initFetch 調用 =====
+        const now = Date.now();
+        if (now - this.state.lastInitFetchTime < 5000) {
+            console.warn('⚠️ initFetch 調用過於頻繁，跳過');
+            return;
+        }
+        this.state.lastInitFetchTime = now;
+
         this.setSystemStatus('loading');
 
         try {
@@ -129,21 +204,27 @@ const App = {
                 const jsonData = await jsonRes.json();
                 baseData = jsonData.games || jsonData;
                 this.state.rawJackpots = jsonData.jackpots || {};
-                if (jsonData.last_updated) {
-                    document.getElementById('last-update-time').innerText =
-                        jsonData.last_updated.split(' ')[0];
+                const lastUpdateEl = document.getElementById('last-update-time');
+                if (lastUpdateEl && jsonData.last_updated) {
+                    lastUpdateEl.innerText = jsonData.last_updated.split(' ')[0];
                 }
             }
 
-            const zipPromises = CONFIG.ZIP_URLS.map(async (url) => {
-                try {
-                    return await fetchAndParseZip(url);
-                } catch (e) {
-                    console.warn(`ZIP 載入失敗: ${url}`, e);
-                    return {};
-                }
-            });
-            const zipResults = await Promise.all(zipPromises);
+            // ===== 使用緩存的 ZIP 數據 =====
+            let zipResults = this.state.zipDataCache;
+            if (!zipResults) {
+                const zipPromises = CONFIG.ZIP_URLS.map(async (url) => {
+                    try {
+                        return await fetchAndParseZip(url);
+                    } catch (e) {
+                        console.warn(`ZIP 載入失敗: ${url}`, e);
+                        return {};
+                    }
+                });
+                zipResults = await Promise.all(zipPromises);
+                this.state.zipDataCache = zipResults;  // 緩存 ZIP 數據
+                console.log('✅ ZIP 數據已緩存');
+            }
 
             const localCache = loadFromCache()?.data || {};
 
@@ -159,10 +240,9 @@ const App = {
             const liveData = await fetchLiveLotteryData();
 
             if (liveData && Object.keys(liveData).length > 0) {
-                // [新增邏輯] 從 Live Data 更新累積獎金 (取最新一期的 jackpot)
+                // 從 Live Data 更新累積獎金 (取最新一期的 jackpot)
                 for (const game in liveData) {
                     if (liveData[game].length > 0) {
-                        // 確保排序是新的在前面
                         const sorted = liveData[game].sort((a, b) => new Date(b.date) - new Date(a.date));
                         const latest = sorted[0];
                         if (latest.jackpot && latest.jackpot > 0) {
@@ -178,6 +258,8 @@ const App = {
                     null
                 );
                 this.processAndRender(finalData);
+                this.state.liveDataCache = liveData;  // 緩存 Live 數據
+
                 if (this.state.currentGame) {
                     this.updateDashboard();
                 }
@@ -202,8 +284,6 @@ const App = {
             this.state.rawData[game] = this.state.rawData[game]
                 .map(item => {
                     const gameDef = GAME_CONFIG.GAMES[game];
-                    // [Fix] 侵略性清洗 + 強制整形：解決資料長度不符導致的驗證失敗
-                    // 1. 基礎清洗：轉型 Number 並剔除無效值（digit 允許 0，其餘玩法不允許 0）
                     const minValid = (gameDef && gameDef.type === 'digit') ? 0 : 1;
                     const clean = (arr) => Array.isArray(arr)
                         ? arr.map(n => Number(n)).filter(n => !isNaN(n) && n >= minValid)
@@ -212,20 +292,14 @@ const App = {
                     let nums = clean(item.numbers);
                     let numsSize = clean(item.numbers_size);
 
-
-
-
-                    // 2. 強制整形：針對 'today' (今彩539) 與 'digit' (星彩) 執行嚴格切割
-                    // 這能確保即便原始資料有雜訊 (如6碼)，也會被強制修正為正確長度 (如5碼)
                     if (gameDef) {
                         if (gameDef.type === 'today') {
-                            nums = nums.slice(0, 5); // 539 嚴格 5 碼
+                            nums = nums.slice(0, 5);
                             numsSize = numsSize.slice(0, 5);
                         } else if (gameDef.type === 'digit') {
-                            nums = nums.slice(0, gameDef.count); // 星彩嚴格 N 碼
+                            nums = nums.slice(0, gameDef.count);
                             numsSize = numsSize.slice(0, gameDef.count);
                         }
-                        // Lotto/Power 類型通常允許 6 或 7 碼 (含特別號)，故不強制切為 6
                     }
 
                     return {
@@ -242,6 +316,9 @@ const App = {
     setSystemStatus(status, dateStr = "") {
         const text = document.getElementById('system-status-text');
         const icon = document.getElementById('system-status-icon');
+        
+        if (!text || !icon) return;
+
         if (status === 'loading') {
             text.innerText = "連線更新中...";
             text.className = "text-yellow-600 font-bold";
@@ -290,6 +367,8 @@ const App = {
     // ================== UI：遊戲 & 歷史 & 學派 ==================
     renderGameButtons() {
         const container = document.getElementById('game-btn-container');
+        if (!container) return;
+
         container.innerHTML = '';
         GAME_CONFIG.ORDER.forEach(gameName => {
             const btn = document.createElement('div');
@@ -314,11 +393,18 @@ const App = {
     },
 
     updateDashboard() {
+        // ===== 節流：防止過於頻繁的更新 =====
+        const now = Date.now();
+        if (now - this.state.lastDashboardUpdate < CONFIG.DASHBOARD_UPDATE_THROTTLE) {
+            return;
+        }
+        this.state.lastDashboardUpdate = now;
+
         const gameName = this.state.currentGame;
         const gameDef = GAME_CONFIG.GAMES[gameName];
         let data = this.state.rawData[gameName] || [];
 
-        // [新增] 動態調整包牌按鈕文字 (pack_1)
+        // 動態調整包牌按鈕文字 (pack_1)
         const pack1Text = document.getElementById('btn-pack-1-text');
         if (pack1Text) {
             if (gameDef.type === 'power') {
@@ -340,10 +426,13 @@ const App = {
             data = data.filter(item => (item.date.getMonth() + 1) === parseInt(this.state.filterMonth));
         }
 
-        document.getElementById('current-game-title').innerText = gameName;
-        document.getElementById('total-count').innerText = data.length;
-        document.getElementById('latest-period').innerText =
-            data.length > 0 ? `${data[0].period}期` : "--期";
+        const titleEl = document.getElementById('current-game-title');
+        const countEl = document.getElementById('total-count');
+        const periodEl = document.getElementById('latest-period');
+
+        if (titleEl) titleEl.innerText = gameName;
+        if (countEl) countEl.innerText = data.length;
+        if (periodEl) periodEl.innerText = data.length > 0 ? `${data[0].period}期` : "--期";
 
         const jackpotContainer = document.getElementById('jackpot-container');
         if (jackpotContainer) jackpotContainer.classList.add('hidden');
@@ -352,8 +441,9 @@ const App = {
         this.renderHotStats('stat-year', data);
         this.renderHotStats('stat-month', data.slice(0, 30));
         this.renderHotStats('stat-recent', data.slice(0, 10));
-        document.getElementById('no-result-msg')
-            .classList.toggle('hidden', data.length > 0);
+        
+        const noResultMsg = document.getElementById('no-result-msg');
+        if (noResultMsg) noResultMsg.classList.toggle('hidden', data.length > 0);
 
         this.renderDrawOrderControls();
         this.renderHistoryList(data.slice(0, 5));
@@ -362,16 +452,14 @@ const App = {
     getNextDrawDate(drawDays) {
         if (!drawDays || drawDays.length === 0) return "--";
         const today = new Date();
-        const currentDay = today.getDay(); // 0(週日) - 6(週六)
+        const currentDay = today.getDay();
 
-        // 尋找本週是否還有開獎日
         let nextDay = drawDays.find(d => d > currentDay);
         let daysToAdd = 0;
 
         if (nextDay !== undefined) {
             daysToAdd = nextDay - currentDay;
         } else {
-            // 本週已過，找下週的第一個開獎日
             nextDay = drawDays[0];
             daysToAdd = (7 - currentDay) + nextDay;
         }
@@ -390,6 +478,7 @@ const App = {
     renderDrawOrderControls() {
         const container = document.getElementById('draw-order-controls');
         if (!container) return;
+
         container.classList.remove('hidden');
         container.innerHTML = `
             <button onclick="app.setDrawOrder('size')" class="order-btn ${this.state.drawOrder === 'size' ? 'active' : ''}">大小順序</button>
@@ -430,12 +519,12 @@ const App = {
         const rulesContent = document.getElementById('game-rules-content');
         const gameName = this.state.currentGame;
 
-        // 總是顯示區域
-        area.classList.remove('hidden');
-        rulesContent.classList.add('hidden'); // 預設隱藏規則內容
-        container.innerHTML = ''; // 清空容器
+        if (!area || !container || !rulesContent) return;
 
-        // 1. 強制過濾：即使 Config 有定義，針對 3星/4星 也強制不渲染 Tab，只保留規則
+        area.classList.remove('hidden');
+        rulesContent.classList.add('hidden');
+        container.innerHTML = '';
+
         if (gameDef.subModes && !['3星彩', '4星彩'].includes(gameName)) {
             if (!this.state.currentSubMode) {
                 this.state.currentSubMode = gameDef.subModes[0].id;
@@ -451,22 +540,16 @@ const App = {
                 };
                 container.appendChild(tab);
             });
-        }
-        // 2. 如果沒有 subModes 或被強制過濾 (如 3星彩, 4星彩, 大樂透, 威力彩)，渲染資訊卡片 (獎金 + 日期)
-        else {
+        } else {
             this.state.currentSubMode = null;
 
-            // 抓取累積獎金 (若無資料顯示累計中)
             let jackpotText = "累計中";
             if (this.state.rawJackpots && this.state.rawJackpots[gameName]) {
-                // 簡單格式化數字加逗號
                 jackpotText = `$${Number(this.state.rawJackpots[gameName]).toLocaleString()}`;
             }
 
-            // 計算下期開獎
             const nextDate = this.getNextDrawDate(gameDef.drawDays);
 
-            // 只有大樂透和威力彩顯示獎金，其他顯示一般資訊
             if (['lotto', 'power', 'digit'].includes(gameDef.type)) {
                 container.innerHTML = `
                     <div class="flex items-center gap-3 text-xs md:text-sm">
@@ -487,13 +570,19 @@ const App = {
     },
 
     toggleRules() {
-        document.getElementById('game-rules-content')
-            .classList.toggle('hidden');
+        const rulesContent = document.getElementById('game-rules-content');
+        if (rulesContent) rulesContent.classList.toggle('hidden');
     },
 
     renderHistoryList(data) {
         const list = document.getElementById('history-list');
+        if (!list) return;
+
         list.innerHTML = '';
+
+        // ===== 使用 DocumentFragment 優化 DOM 操作 =====
+        const fragment = document.createDocumentFragment();
+
         data.forEach(item => {
             let numsHtml = "";
             const gameDef = GAME_CONFIG.GAMES[this.state.currentGame];
@@ -528,40 +617,57 @@ const App = {
                 }
             }
 
-            list.innerHTML += `
-              <tr class="table-row">
-                <td class="px-5 py-3 border-b border-stone-100">
-                  <div class="font-bold text-stone-700">No. ${item.period}</div>
-                  <div class="text-[10px] text-stone-400">${item.date.toLocaleDateString()}</div>
-                </td>
-                <td class="px-5 py-3 border-b border-stone-100 flex flex-wrap gap-1">
-                  ${numsHtml}
-                </td>
-              </tr>`;
+            const tr = document.createElement('tr');
+            tr.className = 'table-row';
+            tr.innerHTML = `
+              <td class="px-5 py-3 border-b border-stone-100">
+                <div class="font-bold text-stone-700">No. ${item.period}</div>
+                <div class="text-[10px] text-stone-400">${item.date.toLocaleDateString()}</div>
+              </td>
+              <td class="px-5 py-3 border-b border-stone-100 flex flex-wrap gap-1">
+                ${numsHtml}
+              </td>
+            `;
+            fragment.appendChild(tr);
         });
+
+        list.appendChild(fragment);
     },
 
     renderHotStats(elId, dataset) {
         const el = document.getElementById(elId);
+        if (!el) return;
+
         if (!dataset || dataset.length === 0) {
             el.innerHTML = '<span class="text-stone-300 text-[10px]">無數據</span>';
             return;
         }
+
         const freq = {};
         dataset.forEach(d =>
             d.numbers.forEach(n => {
                 freq[n] = (freq[n] || 0) + 1;
             })
         );
+
         const sorted = Object.entries(freq)
             .sort((a, b) => b[1] - a[1])
             .slice(0, 5);
-        el.innerHTML = sorted.map(([n, c]) => `
-            <div class="flex flex-col items-center">
+
+        // ===== 使用 DocumentFragment 優化 =====
+        const fragment = document.createDocumentFragment();
+        sorted.forEach(([n, c]) => {
+            const div = document.createElement('div');
+            div.className = 'flex flex-col items-center';
+            div.innerHTML = `
               <div class="ball ball-hot mb-1 scale-75">${n}</div>
               <div class="text-sm text-stone-600 font-black">${c}</div>
-            </div>
-        `).join('');
+            `;
+            fragment.appendChild(div);
+        });
+
+        el.innerHTML = '';
+        el.appendChild(fragment);
     },
 
     selectSchool(school) {
@@ -579,12 +685,16 @@ const App = {
             activeCard.classList.add(info.color);
         }
         const container = document.getElementById('school-description');
-        container.className =
-            `text-sm leading-relaxed text-stone-600 bg-stone-50 p-5 rounded-xl border-l-4 ${info.color}`;
-        container.innerHTML =
-            `<h4 class="base font-bold mb-3 text-stone-800">${info.title}</h4>${info.desc}`;
-        document.getElementById('wuxing-options')
-            .classList.toggle('hidden', school !== 'wuxing');
+        if (container) {
+            container.className =
+                `text-sm leading-relaxed text-stone-600 bg-stone-50 p-5 rounded-xl border-l-4 ${info.color}`;
+            container.innerHTML =
+                `<h4 class="base font-bold mb-3 text-stone-800">${info.title}</h4>${info.desc}`;
+        }
+        const wuxingOptions = document.getElementById('wuxing-options');
+        if (wuxingOptions) {
+            wuxingOptions.classList.toggle('hidden', school !== 'wuxing');
+        }
     },
 
     // ================= 學派預測入口 (整合 PredictionEngine) =================
@@ -605,10 +715,10 @@ const App = {
         });
     },
 
-
-
     renderRow(resultObj, index, label = null) {
         const container = document.getElementById('prediction-output');
+        if (!container) return;
+
         const colors = {
             stat: 'bg-stone-200 text-stone-700',
             pattern: 'bg-purple-100 text-purple-700',
@@ -620,7 +730,6 @@ const App = {
 
         const displayLabel = label ? label : `SET ${index}`;
 
-        // ===== 只改 UI 顯示：Pos1/Pos2/... 轉成「位數」名稱（不動演算法輸出）=====
         const posNameMapByGame = {
             '3星彩': ['佰位', '拾位', '個位'],
             '4星彩': ['仟位', '佰位', '拾位', '個位']
@@ -628,7 +737,7 @@ const App = {
         const posNames = posNameMapByGame[this.state.currentGame] || null;
 
         const isCandidate = resultObj.metadata?.isCandidate;
-        const clickAttr = isCandidate ? `onclick="app.handleCandidateClick(${JSON.stringify(resultObj.numbers).replace(/"/g, '&quot;')})"` : '';
+        const clickAttr = isCandidate ? `onclick="app.handleCandidateClick(${JSON.stringify(resultObj.numbers).replace(/\"/g, '&quot;')})"` : '';
         const hoverClass = isCandidate ? 'cursor-pointer hover:bg-stone-50 active:scale-95 border-purple-200' : 'border-stone-200';
 
         let html = `
@@ -641,7 +750,6 @@ const App = {
         resultObj.numbers.forEach(item => {
             let displayTag = item.tag;
 
-            // 只在 3/4 星彩把 PosX 轉成位數名稱
             if (posNames && typeof displayTag === 'string') {
                 const m = displayTag.match(/^Pos(\d+)$/);
                 if (m) {
@@ -684,12 +792,11 @@ const App = {
         console.log('🎯 執行包牌擴展...', numbers);
         const gameDef = GAME_CONFIG.GAMES[this.state.currentGame];
         const container = document.getElementById('prediction-output');
+        if (!container) return;
 
-        // 1. 取得擴展注數
         const expandedTickets = PredictionEngine.expandPack(numbers, gameDef);
 
         if (expandedTickets.length > 0) {
-            // 2. 清空候選區並重新渲染最終結果
             container.innerHTML = `
                 <div class="mb-4 p-4 bg-purple-50 rounded-xl border border-purple-100 flex items-center justify-between">
                     <div class="text-purple-800 font-bold text-sm">✨ 已根據選定號碼生成包牌成果 (${expandedTickets.length} 注)</div>
@@ -701,14 +808,14 @@ const App = {
                 this.renderRow(res, idx + 1, `<span class="text-purple-600 font-bold">🎯 包牌組合 ${idx + 1}</span>`);
             });
 
-            // 滾動到頂部
-            document.getElementById('result-area').scrollIntoView({ behavior: 'smooth' });
+            document.getElementById('result-area')?.scrollIntoView({ behavior: 'smooth' });
         }
     },
 
-
     populateYearSelect() {
         const yearSelect = document.getElementById('search-year');
+        if (!yearSelect) return;
+
         const cy = new Date().getFullYear();
         for (let y = 2021; y <= cy; y++) {
             const opt = document.createElement('option');
@@ -720,6 +827,8 @@ const App = {
 
     populateMonthSelect() {
         const monthSelect = document.getElementById('search-month');
+        if (!monthSelect) return;
+
         for (let m = 1; m <= 12; m++) {
             const opt = document.createElement('option');
             opt.value = m;
@@ -734,8 +843,10 @@ const App = {
         this.state.filterMonth = "";
         const pInput = document.getElementById('search-period');
         if (pInput) pInput.value = "";
-        document.getElementById('search-year').value = "";
-        document.getElementById('search-month').value = "";
+        const yearSelect = document.getElementById('search-year');
+        if (yearSelect) yearSelect.value = "";
+        const monthSelect = document.getElementById('search-month');
+        if (monthSelect) monthSelect.value = "";
         this.updateDashboard();
     },
 
@@ -743,6 +854,9 @@ const App = {
         const c = document.getElementById('history-container');
         const a = document.getElementById('history-arrow');
         const t = document.getElementById('history-toggle-text');
+
+        if (!c || !a || !t) return;
+
         if (c.classList.contains('max-h-0')) {
             c.classList.remove('max-h-0');
             c.classList.add('max-h-[1000px]');
@@ -754,6 +868,23 @@ const App = {
             a.classList.remove('rotate-180');
             t.innerText = "顯示近 5 期";
         }
+    },
+
+    // ===== 清理資源 (防止內存洩漏) =====
+    cleanup() {
+        // 清除所有防抖計時器
+        for (const key in this.state.debounceTimers) {
+            clearTimeout(this.state.debounceTimers[key]);
+        }
+        this.state.debounceTimers = {};
+
+        // 移除事件監聽器
+        const periodInput = document.getElementById('search-period');
+        if (periodInput) {
+            periodInput.replaceWith(periodInput.cloneNode(true));
+        }
+
+        console.log('✅ 資源已清理');
     }
 };
 
@@ -778,7 +909,6 @@ window.appBridge = {
 };
 
 // ==================== 暴露 App 到全域 (讓 HTML onclick 能訪問) ====================
-// 將 appBridge 的方法注入到 App 物件 (為了兼容 HTML onclick="app.xxx()")
 Object.assign(App, window.appBridge);
 window.app = App;
 
@@ -787,3 +917,8 @@ window.onload = () => {
     console.log('🚀 應用程式初始化中...');
     App.init();
 };
+
+// ===== 頁面卸載時清理資源 =====
+window.addEventListener('beforeunload', () => {
+    App.cleanup();
+});
