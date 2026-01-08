@@ -1,0 +1,23 @@
+{
+    "name": "lottery-analyzer",
+    "version": "2.0.0",
+    "type": "module",
+    "description": "台彩全能分析儀 - 前後端分離版",
+    "main": "server/server.js",
+    "scripts": {
+        "start": "node server/server.js",
+        "dev": "cd server && npm run dev",
+        "postinstall": "cd server && npm install"
+    },
+    "engines": {
+        "node": ">=18.0.0",
+        "npm": ">=9.0.0"
+    },
+    "keywords": [
+        "lottery",
+        "taiwan",
+        "analysis"
+    ],
+    "author": "Nick",
+    "license": "ISC"
+}
