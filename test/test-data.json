@@ -1,0 +1,140 @@
+{
+  "description": "前後端分離改造 - 測試基準資料",
+  "version": "1.0",
+  "testCases": [
+    {
+      "name": "大樂透-均衡學派-嚴選模式",
+      "game": "lotto",
+      "school": "balance",
+      "mode": "strict",
+      "subMode": null,
+      "expectedOutput": {
+        "numbersCount": 6,
+        "range": { "min": 1, "max": 49 },
+        "hasMetadata": true,
+        "hasSchoolInfo": true
+      }
+    },
+    {
+      "name": "大樂透-AI學派-嚴選模式",
+      "game": "lotto",
+      "school": "ai",
+      "mode": "strict",
+      "subMode": null,
+      "expectedOutput": {
+        "numbersCount": 6,
+        "range": { "min": 1, "max": 49 },
+        "hasMetadata": true,
+        "hasSchoolInfo": true
+      }
+    },
+    {
+      "name": "大樂透-統計學派-嚴選模式",
+      "game": "lotto",
+      "school": "stat",
+      "mode": "strict",
+      "subMode": null,
+      "expectedOutput": {
+        "numbersCount": 6,
+        "range": { "min": 1, "max": 49 },
+        "hasMetadata": true,
+        "hasSchoolInfo": true
+      }
+    },
+    {
+      "name": "威力彩-均衡學派-嚴選模式",
+      "game": "power",
+      "school": "balance",
+      "mode": "strict",
+      "subMode": null,
+      "expectedOutput": {
+        "mainNumbersCount": 6,
+        "zone2NumbersCount": 1,
+        "mainRange": { "min": 1, "max": 38 },
+        "zone2Range": { "min": 1, "max": 8 },
+        "hasMetadata": true
+      }
+    },
+    {
+      "name": "今彩539-均衡學派-嚴選模式",
+      "game": "539",
+      "school": "balance",
+      "mode": "strict",
+      "subMode": null,
+      "expectedOutput": {
+        "numbersCount": 5,
+        "range": { "min": 1, "max": 39 },
+        "hasMetadata": true
+      }
+    },
+    {
+      "name": "大樂透-統計學派-包牌模式",
+      "game": "lotto",
+      "school": "stat",
+      "mode": "pack",
+      "subMode": 1,
+      "expectedOutput": {
+        "hasTickets": true,
+        "minTickets": 1,
+        "hasMetadata": true,
+        "ticketFormat": {
+          "hasNumbers": true,
+          "numbersCount": 6
+        }
+      }
+    },
+    {
+      "name": "大樂透-均衡學派-隨機模式",
+      "game": "lotto",
+      "school": "balance",
+      "mode": "random",
+      "subMode": null,
+      "expectedOutput": {
+        "numbersCount": 6,
+        "range": { "min": 1, "max": 49 },
+        "hasMetadata": true
+      }
+    }
+  ],
+  "sampleHistoryData": {
+    "lotto": [
+      {
+        "date": "2025-01-07",
+        "numbers": [3, 12, 18, 25, 34, 41],
+        "special": 15
+      },
+      {
+        "date": "2025-01-03",
+        "numbers": [7, 14, 21, 28, 35, 42],
+        "special": 9
+      },
+      {
+        "date": "2024-12-31",
+        "numbers": [5, 11, 19, 27, 33, 45],
+        "special": 23
+      }
+    ],
+    "power": [
+      {
+        "date": "2025-01-06",
+        "numbers": [4, 10, 15, 22, 29, 35],
+        "zone2": 3
+      },
+      {
+        "date": "2025-01-02",
+        "numbers": [8, 13, 18, 24, 31, 37],
+        "zone2": 6
+      }
+    ],
+    "539": [
+      {
+        "date": "2025-01-07",
+        "numbers": [5, 12, 18, 25, 32]
+      },
+      {
+        "date": "2025-01-06",
+        "numbers": [3, 9, 15, 21, 28]
+      }
+    ]
+  }
+}
